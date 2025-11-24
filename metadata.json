@@ -1,0 +1,8 @@
+{
+  "name": "FitPro - Pro Athlete Dashboard",
+  "description": "A high-performance body composition tracking and AI coaching dashboard.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
