@@ -3,10 +3,12 @@
 
 
 
+
+
 import React, { useState, useEffect, useRef } from 'react';
-import { WorkoutPlan, ExerciseTarget, ExerciseDefinition, NutritionMealTemplate, MuscleGroup, EquipmentType } from '../types';
+import { WorkoutPlan, ExerciseTarget, ExerciseDefinition, NutritionMealTemplate, MuscleGroup, EquipmentType, Macros } from '../types';
 import { EXERCISE_DATABASE, USER_ID } from '../constants';
-import { Plus, Save, Trash2, Copy, Search, ChevronLeft, Info, Dumbbell, Check, X, Utensils, PenTool, Share2, FileText, Download, MessageCircle, Printer, Calendar, Lock, Edit, LayoutTemplate } from 'lucide-react';
+import { Plus, Save, Trash2, Copy, Search, ChevronLeft, Info, Dumbbell, Check, X, Utensils, PenTool, Share2, FileText, Download, MessageCircle, Printer, Calendar, Lock, Edit, LayoutTemplate, Flame, Beef, Wheat, Droplet } from 'lucide-react';
 
 interface Props {
   onSave: (plan: WorkoutPlan) => void;
@@ -49,6 +51,7 @@ const PlanBuilder: React.FC<Props> = ({ onSave, customExercises, onAddCustomExer
   const [nutritionMeals, setNutritionMeals] = useState<NutritionMealTemplate[]>([]);
   const [newMealName, setNewMealName] = useState('');
   const [newMealDesc, setNewMealDesc] = useState('');
+  const [newMealMacros, setNewMealMacros] = useState<Macros>({ calories: 0, protein: 0, carbs: 0, fats: 0 });
 
   // Search & Custom Exercise State
   const [searchQuery, setSearchQuery] = useState('');
@@ -254,11 +257,13 @@ const PlanBuilder: React.FC<Props> = ({ onSave, customExercises, onAddCustomExer
       const meal: NutritionMealTemplate = {
           id: `meal_${Date.now()}`,
           mealName: newMealName,
-          description: newMealDesc
+          description: newMealDesc,
+          macros: newMealMacros
       };
       setNutritionMeals([...nutritionMeals, meal]);
       setNewMealName('');
       setNewMealDesc('');
+      setNewMealMacros({ calories: 0, protein: 0, carbs: 0, fats: 0 });
   };
 
   const removeMeal = (id: string) => {
@@ -322,8 +327,9 @@ const PlanBuilder: React.FC<Props> = ({ onSave, customExercises, onAddCustomExer
             .notes { font-size: 11px; color: #666; font-style: italic; }
             
             .nutrition-list { list-style: none; padding: 0; margin-top: 15px; }
-            .nutrition-item { border: 1px solid #ddd; padding: 12px; margin-bottom: 8px; border-radius: 8px; display: flex; justify-content: space-between; }
-            .nutrition-name { font-weight: bold; }
+            .nutrition-item { border: 1px solid #ddd; padding: 12px; margin-bottom: 8px; border-radius: 8px; }
+            .nutrition-header { display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 5px;}
+            .nutrition-macros { font-size: 11px; color: #555; display: flex; gap: 10px; margin-top: 5px; }
             
             @media print {
                button { display: none; }
@@ -383,8 +389,18 @@ const PlanBuilder: React.FC<Props> = ({ onSave, customExercises, onAddCustomExer
              <ul class="nutrition-list">
                  ${nutritionMeals.map(meal => `
                     <li class="nutrition-item">
-                        <span class="nutrition-name">${meal.mealName}</span>
-                        <span>${meal.description}</span>
+                        <div class="nutrition-header">
+                            <span>${meal.mealName}</span>
+                        </div>
+                        <div>${meal.description}</div>
+                        ${meal.macros ? `
+                            <div class="nutrition-macros">
+                                <span>کالری: ${meal.macros.calories}</span> | 
+                                <span>پروتئین: ${meal.macros.protein}g</span> | 
+                                <span>کربوهیدرات: ${meal.macros.carbs}g</span> | 
+                                <span>چربی: ${meal.macros.fats}g</span>
+                            </div>
+                        ` : ''}
                     </li>
                  `).join('')}
              </ul>
@@ -485,7 +501,12 @@ const PlanBuilder: React.FC<Props> = ({ onSave, customExercises, onAddCustomExer
                         <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
                            {includeNutrition ? nutritionMeals.map(m => (
                                <div key={m.id} className="p-3 bg-slate-800 rounded-lg">
-                                   <div className="text-sm font-bold text-slate-200">{m.mealName}</div>
+                                   <div className="flex justify-between items-center">
+                                       <div className="text-sm font-bold text-slate-200">{m.mealName}</div>
+                                       {m.macros && m.macros.calories > 0 && (
+                                           <span className="text-[10px] bg-slate-700 px-1.5 py-0.5 rounded text-slate-300">{m.macros.calories} kcal</span>
+                                       )}
+                                   </div>
                                    <div className="text-xs text-slate-500 truncate">{m.description}</div>
                                </div>
                            )) : <p className="text-slate-500 text-sm text-center py-4">برنامه تغذیه ندارد</p>}
@@ -825,6 +846,47 @@ const PlanBuilder: React.FC<Props> = ({ onSave, customExercises, onAddCustomExer
                             className="bg-slate-800 border border-slate-600 rounded-lg p-3 text-white focus:border-emerald-500 outline-none"
                           />
                       </div>
+                      
+                      {/* Macro Inputs */}
+                      <div className="grid grid-cols-4 gap-2 mb-4">
+                          <div>
+                              <label className="text-[10px] text-slate-400 mb-1 block flex items-center gap-1"><Flame size={10}/> کالری</label>
+                              <input 
+                                type="number"
+                                value={newMealMacros.calories}
+                                onChange={e => setNewMealMacros({...newMealMacros, calories: parseInt(e.target.value)})}
+                                className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-center text-xs text-white focus:border-emerald-500 outline-none"
+                              />
+                          </div>
+                          <div>
+                              <label className="text-[10px] text-slate-400 mb-1 block flex items-center gap-1"><Beef size={10}/> پروتئین</label>
+                              <input 
+                                type="number"
+                                value={newMealMacros.protein}
+                                onChange={e => setNewMealMacros({...newMealMacros, protein: parseInt(e.target.value)})}
+                                className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-center text-xs text-white focus:border-emerald-500 outline-none"
+                              />
+                          </div>
+                          <div>
+                              <label className="text-[10px] text-slate-400 mb-1 block flex items-center gap-1"><Wheat size={10}/> کربوهیدرات</label>
+                              <input 
+                                type="number"
+                                value={newMealMacros.carbs}
+                                onChange={e => setNewMealMacros({...newMealMacros, carbs: parseInt(e.target.value)})}
+                                className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-center text-xs text-white focus:border-emerald-500 outline-none"
+                              />
+                          </div>
+                          <div>
+                              <label className="text-[10px] text-slate-400 mb-1 block flex items-center gap-1"><Droplet size={10}/> چربی</label>
+                              <input 
+                                type="number"
+                                value={newMealMacros.fats}
+                                onChange={e => setNewMealMacros({...newMealMacros, fats: parseInt(e.target.value)})}
+                                className="w-full bg-slate-800 border border-slate-600 rounded p-2 text-center text-xs text-white focus:border-emerald-500 outline-none"
+                              />
+                          </div>
+                      </div>
+
                       <button 
                         onClick={addMeal}
                         disabled={!newMealName}
@@ -840,17 +902,27 @@ const PlanBuilder: React.FC<Props> = ({ onSave, customExercises, onAddCustomExer
                           <p className="text-center text-slate-500 py-8">هنوز وعده‌ای اضافه نشده است.</p>
                       )}
                       {nutritionMeals.map(meal => (
-                          <div key={meal.id} className="bg-slate-800 border border-slate-700 p-4 rounded-xl flex items-center justify-between group hover:border-slate-500 transition-colors">
-                              <div>
-                                  <h4 className="text-white font-bold">{meal.mealName}</h4>
-                                  <p className="text-sm text-slate-400">{meal.description}</p>
+                          <div key={meal.id} className="bg-slate-800 border border-slate-700 p-4 rounded-xl flex flex-col gap-2 group hover:border-slate-500 transition-colors">
+                              <div className="flex items-center justify-between">
+                                  <div>
+                                      <h4 className="text-white font-bold">{meal.mealName}</h4>
+                                      <p className="text-sm text-slate-400">{meal.description}</p>
+                                  </div>
+                                  <button 
+                                    onClick={() => removeMeal(meal.id)}
+                                    className="text-slate-600 hover:text-red-400 p-2"
+                                  >
+                                      <Trash2 size={18} />
+                                  </button>
                               </div>
-                              <button 
-                                onClick={() => removeMeal(meal.id)}
-                                className="text-slate-600 hover:text-red-400 p-2"
-                              >
-                                  <Trash2 size={18} />
-                              </button>
+                              {meal.macros && (
+                                  <div className="flex gap-4 text-[10px] text-slate-500 bg-slate-900/50 p-2 rounded-lg">
+                                      <span>کالری: <span className="text-slate-300">{meal.macros.calories}</span></span>
+                                      <span>پروتئین: <span className="text-emerald-400">{meal.macros.protein}g</span></span>
+                                      <span>کربوهیدرات: <span className="text-yellow-400">{meal.macros.carbs}g</span></span>
+                                      <span>چربی: <span className="text-blue-400">{meal.macros.fats}g</span></span>
+                                  </div>
+                              )}
                           </div>
                       ))}
                   </div>

@@ -155,10 +155,18 @@ export interface ExerciseDefinition {
 }
 
 // --- Nutrition Template Structure ---
+export interface Macros {
+  calories: number;
+  protein: number;
+  carbs: number;
+  fats: number;
+}
+
 export interface NutritionMealTemplate {
   id: string;
   mealName: string; // e.g. "Breakfast"
   description: string; // e.g. "5 Eggs + Oats"
+  macros?: Macros;
 }
 
 // --- Table 4: WorkoutPlan (برنامه تمرینی اصلی) ---
@@ -248,6 +256,7 @@ export interface NutritionLog {
   mealName: string; // e.g. "Breakfast"
   description: string; // e.g. "5 Eggs + Oats"
   isCompleted: boolean;
+  macros?: Macros;
 }
 
 // --- NEW: Advanced Nutrition & Fueling ---

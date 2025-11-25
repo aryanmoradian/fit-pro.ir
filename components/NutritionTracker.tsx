@@ -1,8 +1,10 @@
 
+
+
 import React, { useState, useEffect } from 'react';
-import { NutritionLog, WorkoutPlan, DailyNutritionStats } from '../types';
+import { NutritionLog, WorkoutPlan, DailyNutritionStats, Macros } from '../types';
 import { USER_ID } from '../constants';
-import { Save, CheckSquare, Square, Utensils, Plus, Info, Droplet, Wheat, Zap, Beef, Milk, Activity } from 'lucide-react';
+import { Save, CheckSquare, Square, Utensils, Plus, Info, Droplet, Wheat, Zap, Beef, Milk, Activity, Flame, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface Props {
     plan?: WorkoutPlan;
@@ -12,6 +14,7 @@ const NutritionTracker: React.FC<Props> = ({ plan }) => {
   // Meal Checklist State
   const [logs, setLogs] = useState<NutritionLog[]>([]);
   const [isEditing, setIsEditing] = useState(false);
+  const [expandedMealId, setExpandedMealId] = useState<string | null>(null);
 
   // --- Advanced Fueling State ---
   const [dailyStats, setDailyStats] = useState<DailyNutritionStats>({
@@ -20,7 +23,7 @@ const NutritionTracker: React.FC<Props> = ({ plan }) => {
       date: new Date().toISOString().split('T')[0],
       waterIntake: 0,
       fiberIntake: 0,
-      totalProtein: 180, // Target Default
+      totalProtein: 180, // Default target if no plan
       supplementProtein: 0,
       supplements: [
           { name: 'کراتین (5g)', taken: false, time: 'بعد تمرین' },
@@ -39,7 +42,8 @@ const NutritionTracker: React.FC<Props> = ({ plan }) => {
               date: new Date().toISOString().split('T')[0],
               mealName: tpl.mealName,
               description: tpl.description,
-              isCompleted: false
+              isCompleted: false,
+              macros: tpl.macros // Carry over planned macros
           }));
           setLogs(templateLogs);
       } else {
@@ -69,9 +73,32 @@ const NutritionTracker: React.FC<Props> = ({ plan }) => {
   const completedCount = logs.length > 0 ? logs.filter(l => l.isCompleted).length : 0;
   const adherence = logs.length > 0 ? Math.round((completedCount / logs.length) * 100) : 0;
   
-  // Protein Calculation
-  const wholeFoodProtein = Math.max(0, dailyStats.totalProtein - dailyStats.supplementProtein);
-  const wholeFoodPct = dailyStats.totalProtein > 0 ? Math.round((wholeFoodProtein / dailyStats.totalProtein) * 100) : 0;
+  // --- Macro Calculation ---
+  const calculateTotalMacros = (items: NutritionLog[]): Macros => {
+      return items.reduce((acc, log) => {
+          if (log.macros) {
+              return {
+                  calories: acc.calories + (log.macros.calories || 0),
+                  protein: acc.protein + (log.macros.protein || 0),
+                  carbs: acc.carbs + (log.macros.carbs || 0),
+                  fats: acc.fats + (log.macros.fats || 0)
+              };
+          }
+          return acc;
+      }, { calories: 0, protein: 0, carbs: 0, fats: 0 });
+  };
+
+  const targetMacros = calculateTotalMacros(logs); // Total from plan
+  const consumedMacros = calculateTotalMacros(logs.filter(l => l.isCompleted)); // Total from completed logs
+
+  // Protein Quality Calculation
+  // Update totalProtein target based on plan if available, otherwise fallback
+  const totalProteinTarget = targetMacros.protein > 0 ? targetMacros.protein : dailyStats.totalProtein;
+  const wholeFoodProtein = Math.max(0, consumedMacros.protein - dailyStats.supplementProtein); // Approximation using consumed
+  // Or strictly based on manual input:
+  // const wholeFoodProtein = Math.max(0, dailyStats.totalProtein - dailyStats.supplementProtein);
+  
+  const wholeFoodPct = totalProteinTarget > 0 ? Math.round((wholeFoodProtein / totalProteinTarget) * 100) : 0;
 
   if (!plan) {
       return (
@@ -100,28 +127,87 @@ const NutritionTracker: React.FC<Props> = ({ plan }) => {
         </button>
       </div>
 
+      {/* --- MODULE 0: MACRO DASHBOARD (NEW) --- */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-lg">
+          <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+              <Activity size={16} className="text-emerald-400" /> وضعیت ماکروهای روزانه
+          </h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {/* Calories */}
+              <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 relative overflow-hidden group">
+                  <div className="flex justify-between items-start mb-2">
+                      <div className="p-2 bg-orange-500/10 rounded-lg text-orange-400"><Flame size={18}/></div>
+                      <span className="text-[10px] text-slate-400">کالری</span>
+                  </div>
+                  <div className="flex items-end gap-1">
+                      <span className="text-xl font-bold text-white">{consumedMacros.calories}</span>
+                      <span className="text-xs text-slate-500 mb-1">/ {targetMacros.calories}</span>
+                  </div>
+                  <div className="h-1 bg-slate-700 rounded-full mt-2 overflow-hidden">
+                      <div className="h-full bg-orange-500 transition-all duration-1000" style={{ width: `${targetMacros.calories > 0 ? (consumedMacros.calories / targetMacros.calories) * 100 : 0}%` }}></div>
+                  </div>
+              </div>
+
+              {/* Protein */}
+              <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 relative overflow-hidden group">
+                  <div className="flex justify-between items-start mb-2">
+                      <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400"><Beef size={18}/></div>
+                      <span className="text-[10px] text-slate-400">پروتئین</span>
+                  </div>
+                  <div className="flex items-end gap-1">
+                      <span className="text-xl font-bold text-white">{consumedMacros.protein}g</span>
+                      <span className="text-xs text-slate-500 mb-1">/ {targetMacros.protein}g</span>
+                  </div>
+                  <div className="h-1 bg-slate-700 rounded-full mt-2 overflow-hidden">
+                      <div className="h-full bg-emerald-500 transition-all duration-1000" style={{ width: `${targetMacros.protein > 0 ? (consumedMacros.protein / targetMacros.protein) * 100 : 0}%` }}></div>
+                  </div>
+              </div>
+
+              {/* Carbs */}
+              <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 relative overflow-hidden group">
+                  <div className="flex justify-between items-start mb-2">
+                      <div className="p-2 bg-yellow-500/10 rounded-lg text-yellow-400"><Wheat size={18}/></div>
+                      <span className="text-[10px] text-slate-400">کربوهیدرات</span>
+                  </div>
+                  <div className="flex items-end gap-1">
+                      <span className="text-xl font-bold text-white">{consumedMacros.carbs}g</span>
+                      <span className="text-xs text-slate-500 mb-1">/ {targetMacros.carbs}g</span>
+                  </div>
+                  <div className="h-1 bg-slate-700 rounded-full mt-2 overflow-hidden">
+                      <div className="h-full bg-yellow-500 transition-all duration-1000" style={{ width: `${targetMacros.carbs > 0 ? (consumedMacros.carbs / targetMacros.carbs) * 100 : 0}%` }}></div>
+                  </div>
+              </div>
+
+              {/* Fats */}
+              <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 relative overflow-hidden group">
+                  <div className="flex justify-between items-start mb-2">
+                      <div className="p-2 bg-blue-500/10 rounded-lg text-blue-400"><Droplet size={18}/></div>
+                      <span className="text-[10px] text-slate-400">چربی</span>
+                  </div>
+                  <div className="flex items-end gap-1">
+                      <span className="text-xl font-bold text-white">{consumedMacros.fats}g</span>
+                      <span className="text-xs text-slate-500 mb-1">/ {targetMacros.fats}g</span>
+                  </div>
+                  <div className="h-1 bg-slate-700 rounded-full mt-2 overflow-hidden">
+                      <div className="h-full bg-blue-500 transition-all duration-1000" style={{ width: `${targetMacros.fats > 0 ? (consumedMacros.fats / targetMacros.fats) * 100 : 0}%` }}></div>
+                  </div>
+              </div>
+          </div>
+      </div>
+
       {/* --- MODULE 1: PROTEIN SOURCE ANALYSIS (Quality Check) --- */}
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 relative overflow-hidden">
           <div className="flex justify-between items-start mb-4">
               <h3 className="text-lg font-bold text-white flex items-center gap-2">
                   <Activity size={20} className="text-blue-400"/> کیفیت پروتئین
               </h3>
-              <div className="text-xs text-slate-400 bg-slate-900 px-2 py-1 rounded">هدف: {dailyStats.totalProtein}g</div>
+              <div className="text-xs text-slate-400 bg-slate-900 px-2 py-1 rounded">هدف: {totalProteinTarget}g</div>
           </div>
 
           {/* Inputs for Stats */}
-          <div className="grid grid-cols-2 gap-4 mb-6">
+          <div className="grid grid-cols-1 gap-4 mb-6">
              <div>
-                 <label className="text-[10px] text-slate-500 uppercase block mb-1">پروتئین کل (گرم)</label>
-                 <input 
-                    type="number" 
-                    value={dailyStats.totalProtein}
-                    onChange={(e) => setDailyStats({...dailyStats, totalProtein: parseInt(e.target.value)})}
-                    className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white font-mono text-sm"
-                 />
-             </div>
-             <div>
-                 <label className="text-[10px] text-purple-400 uppercase block mb-1">از مکمل/پودر (گرم)</label>
+                 <label className="text-[10px] text-purple-400 uppercase block mb-1">پروتئین دریافتی از مکمل/پودر (گرم)</label>
                  <input 
                     type="number" 
                     value={dailyStats.supplementProtein}
@@ -226,11 +312,11 @@ const NutritionTracker: React.FC<Props> = ({ plan }) => {
           </div>
       </div>
 
-      {/* --- MODULE 3: MEAL CHECKLIST (Original) --- */}
+      {/* --- MODULE 3: MEAL CHECKLIST --- */}
       <div className="space-y-4">
         <h3 className="text-lg font-bold text-white mt-8 mb-2 border-b border-slate-700 pb-2">لیست وعده‌های غذایی</h3>
         {logs.map(log => (
-            <div key={log.id} className="bg-slate-800 border border-slate-700 rounded-xl p-4 transition-all hover:border-slate-600">
+            <div key={log.id} className={`bg-slate-800 border rounded-xl p-4 transition-all hover:border-slate-600 ${log.isCompleted ? 'border-emerald-500/30 bg-emerald-900/5' : 'border-slate-700'}`}>
                 <div className="flex items-start gap-4">
                     {/* Checkbox */}
                     <button 
@@ -241,20 +327,40 @@ const NutritionTracker: React.FC<Props> = ({ plan }) => {
                     </button>
 
                     <div className="flex-1">
-                        <h4 className={`font-bold text-lg ${log.isCompleted ? 'text-slate-500 line-through' : 'text-white'}`}>
-                            {log.mealName}
-                        </h4>
+                        <div className="flex justify-between items-start" onClick={() => setExpandedMealId(expandedMealId === log.id ? null : log.id)}>
+                            <div>
+                                <h4 className={`font-bold text-lg ${log.isCompleted ? 'text-slate-500 line-through' : 'text-white'}`}>
+                                    {log.mealName}
+                                </h4>
+                                {log.macros && (
+                                    <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">
+                                        <span className="flex items-center gap-1 text-orange-300"><Flame size={10}/> {log.macros.calories}</span>
+                                        <span className="text-slate-600">|</span>
+                                        <span>P: {log.macros.protein}g</span>
+                                        <span>C: {log.macros.carbs}g</span>
+                                        <span>F: {log.macros.fats}g</span>
+                                    </div>
+                                )}
+                            </div>
+                            <button className="text-slate-500 hover:text-white">
+                                {expandedMealId === log.id ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}
+                            </button>
+                        </div>
                         
-                        {isEditing ? (
-                            <input 
-                                value={log.description}
-                                onChange={(e) => updateDescription(log.id, e.target.value)}
-                                className="w-full bg-slate-900 border border-slate-600 rounded p-2 mt-2 text-white text-sm"
-                            />
-                        ) : (
-                            <p className={`text-sm mt-1 ${log.isCompleted ? 'text-slate-600' : 'text-slate-300'}`}>
-                                {log.description}
-                            </p>
+                        {expandedMealId === log.id && (
+                            <div className="mt-3 pt-3 border-t border-slate-700/50 animate-fade-in">
+                                {isEditing ? (
+                                    <input 
+                                        value={log.description}
+                                        onChange={(e) => updateDescription(log.id, e.target.value)}
+                                        className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white text-sm"
+                                    />
+                                ) : (
+                                    <p className={`text-sm ${log.isCompleted ? 'text-slate-600' : 'text-slate-300'}`}>
+                                        {log.description}
+                                    </p>
+                                )}
+                            </div>
                         )}
                     </div>
                 </div>
