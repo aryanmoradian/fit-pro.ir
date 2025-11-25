@@ -1,40 +1,117 @@
-
-import React, { useState } from 'react';
-import { MOCK_TRAINEES, MOCK_MESSAGES, USER_ID } from '../constants';
-import { Send, Search, User, Clock, CheckCheck, MessageSquare } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { DirectMessage, TraineeSummary } from '../types';
+import { Send, Search, User, CheckCheck, MessageSquare, Loader2 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { fetchCoachTrainees, fetchMessages, sendDirectMessage } from '../services/userData';
+import { supabase } from '../lib/supabaseClient';
 
 const CoachMessenger: React.FC = () => {
-  // Ensure we start with empty if MOCK_TRAINEES is empty (which it is now)
+  const { user } = useAuth();
+  const [trainees, setTrainees] = useState<TraineeSummary[]>([]);
   const [selectedChatId, setSelectedChatId] = useState<string>('');
-  const [messages, setMessages] = useState(MOCK_MESSAGES); // Now empty
+  const [messages, setMessages] = useState<DirectMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
-  
-  const trainees = MOCK_TRAINEES; // Now empty
+  const [isLoadingChats, setIsLoadingChats] = useState(true);
+  const [isSending, setIsSending] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // 1. Load Contact List (Trainees)
+  useEffect(() => {
+      if (user?.id) {
+          fetchCoachTrainees(user.id)
+            .then(data => {
+                setTrainees(data);
+                // Auto-select first trainee if available
+                if(data.length > 0) setSelectedChatId(data[0].id);
+            })
+            .catch(console.error)
+            .finally(() => setIsLoadingChats(false));
+      }
+  }, [user?.id]);
+
+  // 2. Load Messages & Subscribe to Realtime
+  useEffect(() => {
+      if (!user?.id || !selectedChatId) return;
+
+      const loadHistory = async () => {
+          const history = await fetchMessages(user.id, selectedChatId);
+          setMessages(history);
+          setTimeout(scrollToBottom, 100);
+      };
+      loadHistory();
+
+      // --- REALTIME SUBSCRIPTION ---
+      const channel = supabase
+        .channel(`chat_${user.id}_${selectedChatId}`)
+        .on(
+            'postgres_changes', 
+            { 
+                event: 'INSERT', 
+                schema: 'public', 
+                table: 'direct_messages',
+                filter: `receiver_id=eq.${user.id}` // Listen for incoming messages
+            }, 
+            (payload) => {
+                // Only add if it belongs to current chat
+                if (payload.new.sender_id === selectedChatId) {
+                    const newMsg: DirectMessage = {
+                        id: payload.new.id,
+                        senderId: payload.new.sender_id,
+                        receiverId: payload.new.receiver_id,
+                        senderName: 'Trainee', // Simplified
+                        text: payload.new.text,
+                        timestamp: new Date(payload.new.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        isRead: false
+                    };
+                    setMessages(prev => [...prev, newMsg]);
+                    setTimeout(scrollToBottom, 100);
+                }
+            }
+        )
+        .subscribe();
+
+      return () => {
+          supabase.removeChannel(channel);
+      };
+  }, [selectedChatId, user?.id]);
+
+  const handleSend = async () => {
+      if (!newMessage.trim() || !selectedChatId || !user?.id) return;
+      
+      const tempId = `temp_${Date.now()}`;
+      const tempMsg: DirectMessage = {
+          id: tempId,
+          senderId: user.id,
+          receiverId: selectedChatId,
+          senderName: 'Me',
+          text: newMessage,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          isRead: false
+      };
+
+      // Optimistic UI Update
+      setMessages(prev => [...prev, tempMsg]);
+      setNewMessage('');
+      setTimeout(scrollToBottom, 100);
+      setIsSending(true);
+
+      try {
+          await sendDirectMessage(user.id, selectedChatId, tempMsg.text);
+          // Real message will replace temp via fetch or we just keep it
+      } catch (err) {
+          console.error("Failed to send", err);
+          alert("خطا در ارسال پیام.");
+          setMessages(prev => prev.filter(m => m.id !== tempId)); // Revert on error
+      } finally {
+          setIsSending(false);
+      }
+  };
 
   const selectedTrainee = trainees.find(t => t.id === selectedChatId);
-  
-  // Filter messages for selected chat
-  const activeMessages = messages.filter(
-      m => (m.senderId === USER_ID && m.receiverId === selectedChatId) || 
-           (m.senderId === selectedChatId && m.receiverId === USER_ID)
-  );
-
-  const handleSend = () => {
-      if (!newMessage.trim() || !selectedChatId) return;
-      
-      const msg = {
-          id: `msg_${Date.now()}`,
-          senderId: USER_ID,
-          receiverId: selectedChatId,
-          senderName: 'مربی',
-          text: newMessage,
-          timestamp: 'الان',
-          isRead: true
-      };
-      
-      setMessages([...messages, msg]);
-      setNewMessage('');
-  };
 
   return (
     <div className="flex h-[calc(100vh-8rem)] bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden animate-fade-in shadow-2xl">
@@ -51,46 +128,44 @@ const CoachMessenger: React.FC = () => {
                     />
                 </div>
             </div>
-            <div className="flex-1 overflow-y-auto">
-                {trainees.length === 0 && (
+            <div className="flex-1 overflow-y-auto custom-scrollbar">
+                {isLoadingChats && <div className="p-4 text-center"><Loader2 className="animate-spin text-emerald-500 mx-auto"/></div>}
+                
+                {!isLoadingChats && trainees.length === 0 && (
                     <div className="p-6 text-center text-slate-500">
                         <MessageSquare className="mx-auto mb-2 opacity-30" size={24}/>
                         <p className="text-xs">لیست مخاطبین خالی است.</p>
                     </div>
                 )}
-                {trainees.map(trainee => {
-                    const lastMsg = messages.filter(m => m.senderId === trainee.id || m.receiverId === trainee.id).pop();
-                    
-                    return (
-                        <div 
-                            key={trainee.id}
-                            onClick={() => setSelectedChatId(trainee.id)}
-                            className={`p-4 flex items-center gap-3 cursor-pointer hover:bg-slate-800/50 transition-colors ${selectedChatId === trainee.id ? 'bg-slate-800 border-r-4 border-emerald-500' : ''}`}
-                        >
-                            <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center overflow-hidden">
-                                {trainee.photoUrl ? <img src={trainee.photoUrl} className="w-full h-full object-cover"/> : <User size={20} className="text-slate-400"/>}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                                <div className="flex justify-between items-center mb-1">
-                                    <h4 className="font-bold text-white text-sm truncate">{trainee.name}</h4>
-                                    <span className="text-[10px] text-slate-500">{lastMsg?.timestamp}</span>
-                                </div>
-                                <p className="text-xs text-slate-400 truncate">{lastMsg?.text || 'شروع گفتگو'}</p>
-                            </div>
+                
+                {trainees.map(trainee => (
+                    <div 
+                        key={trainee.id}
+                        onClick={() => setSelectedChatId(trainee.id)}
+                        className={`p-4 flex items-center gap-3 cursor-pointer hover:bg-slate-800/50 transition-colors border-b border-slate-800/50 ${selectedChatId === trainee.id ? 'bg-slate-800 border-r-4 border-r-emerald-500' : ''}`}
+                    >
+                        <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                            {trainee.photoUrl ? <img src={trainee.photoUrl} className="w-full h-full object-cover" alt=""/> : <User size={20} className="text-slate-400"/>}
                         </div>
-                    );
-                })}
+                        <div className="flex-1 min-w-0">
+                            <div className="flex justify-between items-center mb-1">
+                                <h4 className={`font-bold text-sm truncate ${selectedChatId === trainee.id ? 'text-white' : 'text-slate-300'}`}>{trainee.name}</h4>
+                            </div>
+                            <p className="text-xs text-slate-500 truncate">{trainee.planName}</p>
+                        </div>
+                    </div>
+                ))}
             </div>
         </div>
 
         {/* Main Chat Window */}
-        <div className="flex-1 flex flex-col bg-slate-800">
+        <div className="flex-1 flex flex-col bg-slate-800 relative">
             {selectedTrainee ? (
                 <>
                     {/* Header */}
-                    <div className="p-4 border-b border-slate-700 flex items-center gap-3 bg-slate-800/80 backdrop-blur">
+                    <div className="p-4 border-b border-slate-700 flex items-center gap-3 bg-slate-800/80 backdrop-blur z-10">
                          <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center overflow-hidden">
-                            {selectedTrainee.photoUrl ? <img src={selectedTrainee.photoUrl} className="w-full h-full object-cover"/> : <User size={20} className="text-slate-400"/>}
+                            {selectedTrainee.photoUrl ? <img src={selectedTrainee.photoUrl} className="w-full h-full object-cover" alt=""/> : <User size={20} className="text-slate-400"/>}
                         </div>
                         <div>
                             <h3 className="font-bold text-white">{selectedTrainee.name}</h3>
@@ -101,26 +176,29 @@ const CoachMessenger: React.FC = () => {
                     </div>
 
                     {/* Messages Area */}
-                    <div className="flex-1 overflow-y-auto p-6 space-y-4 flex flex-col">
-                        {activeMessages.length === 0 && (
+                    <div className="flex-1 overflow-y-auto p-6 space-y-4 flex flex-col custom-scrollbar bg-slate-900/30">
+                        {messages.length === 0 && (
                             <div className="text-center text-slate-500 my-auto">
-                                <p>هنوز پیامی رد و بدل نشده است.</p>
+                                <MessageSquare size={48} className="mx-auto mb-2 opacity-20"/>
+                                <p className="text-sm">هنوز پیامی رد و بدل نشده است.</p>
+                                <p className="text-xs">سرصحبت را باز کنید!</p>
                             </div>
                         )}
-                        {activeMessages.map((msg, idx) => {
-                            const isMe = msg.senderId === USER_ID;
+                        {messages.map((msg, idx) => {
+                            const isMe = msg.senderId === user?.id;
                             return (
                                 <div key={idx} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[70%] rounded-2xl p-3 ${isMe ? 'bg-emerald-600 text-white rounded-tl-none' : 'bg-slate-700 text-slate-200 rounded-tr-none'}`}>
-                                        <p className="text-sm leading-relaxed">{msg.text}</p>
+                                    <div className={`max-w-[75%] rounded-2xl p-3 shadow-md ${isMe ? 'bg-emerald-600 text-white rounded-tl-none' : 'bg-slate-700 text-slate-200 rounded-tr-none'}`}>
+                                        <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>
                                         <div className={`flex items-center gap-1 text-[10px] mt-1 ${isMe ? 'text-emerald-200 justify-end' : 'text-slate-400'}`}>
                                             <span>{msg.timestamp}</span>
-                                            {isMe && <CheckCheck size={12} />}
+                                            {isMe && <CheckCheck size={12} className="opacity-70" />}
                                         </div>
                                     </div>
                                 </div>
                             );
                         })}
+                        <div ref={messagesEndRef} />
                     </div>
 
                     {/* Input Area */}
@@ -132,21 +210,25 @@ const CoachMessenger: React.FC = () => {
                                 onChange={(e) => setNewMessage(e.target.value)}
                                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
                                 placeholder="پیام خود را بنویسید..." 
-                                className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white outline-none focus:border-emerald-500 transition-colors"
+                                className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white outline-none focus:border-emerald-500 transition-colors placeholder-slate-500"
+                                disabled={isSending}
                             />
                             <button 
                                 onClick={handleSend}
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white p-3 rounded-xl transition-colors"
+                                disabled={!newMessage.trim() || isSending}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white p-3 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                                <Send size={20} className="rotate-180" />
+                                {isSending ? <Loader2 size={20} className="animate-spin"/> : <Send size={20} className="rotate-180" />}
                             </button>
                         </div>
                     </div>
                 </>
             ) : (
-                <div className="flex items-center justify-center h-full text-slate-500 flex-col gap-2">
-                    <MessageSquare size={48} className="opacity-20" />
-                    <p>یک گفتگو را انتخاب کنید</p>
+                <div className="flex items-center justify-center h-full text-slate-500 flex-col gap-4">
+                    <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center animate-pulse">
+                        <MessageSquare size={32} className="opacity-50" />
+                    </div>
+                    <p>لطفاً یک گفتگو را انتخاب کنید</p>
                 </div>
             )}
         </div>

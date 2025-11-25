@@ -1,8 +1,6 @@
-
 import React, { useState, useEffect } from 'react';
-import { Users, AlertTriangle, ShieldAlert, MessageSquare, Eye, Lock, Crown, X, Activity, Filter, Loader2, UserPlus, Check, Copy, Clock, ArrowUpDown, ChevronDown, Send, Zap, Layers, CheckSquare, Square, Trash2, ArrowUp, ArrowDown, Info, Upload, RefreshCw, Briefcase } from 'lucide-react';
-import { UserProfile, TraineeSummary, WorkoutPlan } from '../types';
-import { generateWeeklyReport } from '../services/geminiService';
+import { Users, AlertTriangle, ShieldAlert, MessageSquare, Eye, Lock, Crown, X, Activity, Filter, Loader2, UserPlus, Check, Copy, Clock, ArrowUpDown, ChevronDown, Send, Zap, Layers, CheckSquare, Square, RefreshCw, Briefcase, Info, Upload, ArrowUp, ArrowDown } from 'lucide-react';
+import { UserProfile, TraineeSummary } from '../types';
 import SubscriptionModal from './SubscriptionModal';
 import { uploadCertification, updateCoachVerificationStatus, generateInviteCode, sendEmailNotification, fetchCoachTrainees } from '../services/userData';
 import { supabase } from '../lib/supabaseClient'; 

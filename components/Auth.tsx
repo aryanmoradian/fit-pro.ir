@@ -1,18 +1,13 @@
-
 import React, { useState, useEffect } from 'react';
-import { AuthData, AuthViewMode, UserRole, UserProfile } from '../types';
-import { Activity, Mail, Lock, User, Upload, Crown, TrendingUp, Quote, Phone, Eye, EyeOff, CheckCircle, Info, Loader2, KeyRound, ArrowRight } from 'lucide-react';
+import { AuthViewMode, UserRole } from '../types';
+import { Activity, Mail, Lock, User, Upload, Crown, TrendingUp, Quote, Phone, Eye, EyeOff, CheckCircle, Info, Loader2, ArrowRight } from 'lucide-react';
 import PredictiveWidget from './PredictiveWidget';
-import { supabase } from '../supabaseConfig'; 
-import { saveUserProfile, uploadCertification } from '../services/userData';
-import { MOCK_COACH_PROFILE, MOCK_ATHLETE_PROFILE } from '../constants';
+import { useAuth } from '../context/AuthContext';
+import { uploadCertification } from '../services/userData';
+import { supabase } from '../lib/supabaseClient'; // Needed only for manual updates like Cert upload if AuthContext doesn't cover it
 
-interface Props {
-  onLogin: (email: string) => void;
-  onSignup: (data: AuthData) => void;
-}
-
-const Auth: React.FC<Props> = ({ onLogin, onSignup }) => {
+const Auth: React.FC = () => {
+  const { signIn, signUp } = useAuth();
   const [view, setView] = useState<AuthViewMode>('LOGIN');
   
   // Inputs
@@ -64,7 +59,7 @@ const Auth: React.FC<Props> = ({ onLogin, onSignup }) => {
     setError('');
     setIsLoading(true);
     try {
-      const { data, error } = await supabase.auth.signInWithOAuth({
+      const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
             redirectTo: window.location.origin, 
@@ -88,16 +83,9 @@ const Auth: React.FC<Props> = ({ onLogin, onSignup }) => {
     setError('');
     setIsLoading(true);
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
-          password: password
-      });
-
+      const { error } = await signIn(email.trim(), password);
       if (error) throw error;
-      
-      if (data.user) {
-          onLogin(data.user.email || email);
-      }
+      // AuthContext and App will handle redirection upon state change
     } catch (err: any) {
         console.error(err);
         setError(err.message === 'Invalid login credentials' ? "ایمیل یا رمز عبور اشتباه است." : err.message);
@@ -137,59 +125,45 @@ const Auth: React.FC<Props> = ({ onLogin, onSignup }) => {
       setIsEmailDuplicate(false);
       setIsLoading(true);
       try {
-          // 1. Sign Up
-          const { data, error } = await supabase.auth.signUp({
-              email: email.trim(),
-              password: password,
-              options: {
-                  data: {
-                      full_name: name,
-                      phone: phoneNumber,
-                      role: role 
-                  }
-              }
+          // 1. Sign Up - Critical: Pass Metadata for SQL Trigger to handle Profile Creation
+          const { error } = await signUp(email.trim(), password, {
+              full_name: name,
+              phone: phoneNumber,
+              role: role 
           });
 
           if (error) throw error;
-          if (!data.user) throw new Error("User creation failed.");
 
-          const user = data.user;
-
-          // 2. Upload Cert if Coach
-          let uploadedCertUrl = '';
-          if (role === 'Coach' && certFile) {
-              uploadedCertUrl = await uploadCertification(user.id, certFile);
-          }
-
-          // 3. Create Profile in 'profiles' table
-          const initialProfile: UserProfile = role === 'Coach' ? {
-              ...MOCK_COACH_PROFILE,
-              id: user.id,
-              name: name,
-              email: email.trim(),
-              role: 'Coach',
-              verificationStatus: 'Pending',
-              certUrl: uploadedCertUrl,
-              bio: bio,
-              phoneNumber: phoneNumber
-          } as any : {
-              ...MOCK_ATHLETE_PROFILE,
-              id: user.id,
-              name: name,
-              email: email.trim(),
-              role: 'Trainee',
-              phoneNumber: phoneNumber
-          } as any;
-
-          await saveUserProfile(initialProfile);
-
-          if (data.session) {
-             onLogin(email);
-          } else {
-             setVerificationSentTo(email);
-             setView('VERIFY_EMAIL'); 
-          }
+          // We need to get the user ID to upload certs. Since signUp might not return session immediately if email confirmation is on,
+          // we might need to handle this carefully. Assuming auto-confirm for now or that we can get user from response.
+          // Note: AuthContext doesn't return the user object from signUp explicitly in the interface I defined, but supabase does.
+          // Let's re-fetch user session if auto-login happened.
           
+          // For Coach Certs: ideally this should be done after login. 
+          // If the user is created but not logged in (verify email), we can't upload certs yet due to RLS.
+          // We will prompt user to upload certs in profile if they are a coach and skipped this step due to verification flow.
+          // However, if session IS active (no verification required), we proceed.
+          
+          const { data: { session } } = await supabase.auth.getSession();
+          
+          if (session?.user && role === 'Coach' && certFile) {
+              try {
+                  const uploadedCertUrl = await uploadCertification(session.user.id, certFile);
+                  // Update profile with bio and cert
+                  await supabase.from('profiles').update({
+                      bio: bio,
+                      cert_url: uploadedCertUrl 
+                  }).eq('id', session.user.id);
+              } catch (uploadErr) {
+                  console.error("Certificate upload failed but user created:", uploadErr);
+              }
+          } else if (!session && role === 'Coach') {
+              // Email verification required case
+              setVerificationSentTo(email);
+              setView('VERIFY_EMAIL'); 
+              return; // Exit early to show verification view
+          }
+
       } catch (err: any) {
           console.error(err);
           if (err.message?.includes('already registered')) {
@@ -451,56 +425,60 @@ const Auth: React.FC<Props> = ({ onLogin, onSignup }) => {
                     <div className="border-2 border-dashed border-slate-700 rounded-xl p-6 text-center cursor-pointer bg-slate-950 relative"><input type="file" className="absolute inset-0 opacity-0 cursor-pointer" onChange={(e) => setCertFile(e.target.files?.[0] || null)}/><Upload className="mx-auto mb-2 text-slate-500"/><span className="text-sm text-slate-300 block">{certFile ? certFile.name : 'آپلود مدرک مربیگری'}</span></div>
                     <textarea value={bio} onChange={e => setBio(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-white h-24 text-sm" placeholder="بیوگرافی و افتخارات..."/>
                     <div className="flex items-center gap-2"><div onClick={() => setAgreed(!agreed)} className={`w-5 h-5 border-2 rounded flex items-center justify-center cursor-pointer ${agreed ? 'bg-emerald-500 border-emerald-500' : 'border-slate-600'}`}>{agreed && <CheckCircle size={14} className="text-white"/>}</div><span className="text-xs text-slate-400">صحت مدارک را تأیید می‌کنم.</span></div>
-                    
-                    <button type="submit" disabled={!agreed || !certFile || !bio || isLoading} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl disabled:opacity-50 flex items-center justify-center gap-2">
-                        {isLoading ? <Loader2 className="animate-spin"/> : 'ارسال و ثبت نام نهایی'}
+
+                    <button 
+                        type="submit" 
+                        disabled={isLoading || !agreed || !certFile}
+                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl mt-4 flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                        {isLoading ? <Loader2 className="animate-spin" size={20}/> : 'ارسال مدارک و ثبت نام'}
                     </button>
-                    <button type="button" disabled={isLoading} onClick={() => setView('SIGNUP_ROLE')} className="w-full text-slate-500 text-sm py-2 hover:text-white">بازگشت</button>
+                    
+                     <button type="button" onClick={() => setView('SIGNUP_ROLE')} className="w-full text-slate-500 text-sm py-2 hover:text-white">بازگشت</button>
                 </form>
             )}
 
             {view === 'VERIFY_EMAIL' && (
-                 <div className="space-y-6 animate-fade-in max-w-sm mx-auto w-full text-center">
-                     <div className="bg-slate-800 p-4 rounded-2xl inline-block mb-2"><Mail size={32} className="text-emerald-400"/></div>
-                     <div>
-                         <h2 className="text-xl font-bold text-white mb-2">لینک فعال‌سازی ارسال شد</h2>
-                         <p className="text-slate-400 text-sm leading-relaxed">
-                             یک ایمیل حاوی لینک فعال‌سازی به آدرس زیر ارسال شد:<br/>
-                             <span className="text-white font-bold">{verificationSentTo}</span>
-                         </p>
+                <div className="text-center animate-fade-in py-10">
+                     <div className="w-20 h-20 bg-blue-900/20 rounded-full flex items-center justify-center mx-auto mb-6 border border-blue-500/30">
+                        <Mail size={32} className="text-blue-400" />
                      </div>
-                     
-                     <div className="bg-blue-500/10 border border-blue-500/20 p-3 rounded-lg text-xs text-blue-300 flex items-start gap-2 text-right">
-                        <Info className="shrink-0 mt-0.5" size={16} />
-                        <div>
-                            <p>لطفاً ایمیل خود را چک کنید (پوشه Spam را هم ببینید) و روی لینک کلیک کنید.</p>
-                        </div>
-                     </div>
-
-                     <button type="button" onClick={() => setView('LOGIN')} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl">بازگشت به صفحه ورود</button>
-                 </div>
+                     <h3 className="text-xl font-bold text-white mb-2">ایمیل خود را چک کنید</h3>
+                     <p className="text-slate-400 text-sm mb-6 max-w-xs mx-auto">
+                        لینک تأیید حساب کاربری به آدرس <strong>{verificationSentTo}</strong> ارسال شد.
+                     </p>
+                     <button onClick={() => setView('LOGIN')} className="text-emerald-400 hover:underline text-sm">بازگشت به ورود</button>
+                </div>
             )}
             
             {view === 'FORGOT_PASSWORD' && (
-                 <form onSubmit={handleForgotPasswordRequest} className="space-y-6 animate-fade-in max-w-sm mx-auto w-full text-center">
-                     <div className="bg-slate-800 p-4 rounded-2xl inline-block mb-2"><KeyRound size={32} className="text-blue-400"/></div>
-                     <div><h2 className="text-xl font-bold text-white mb-2">بازیابی رمز عبور</h2><p className="text-slate-400 text-sm">برای دریافت لینک تغییر رمز، ایمیل خود را وارد کنید.</p></div>
-                     
-                     <div className="relative text-right">
-                        <Mail className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
-                        <input 
-                            type="email" 
-                            value={email} 
-                            onChange={e => setEmail(e.target.value)} 
-                            className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3.5 pr-10 pl-4 text-white outline-none focus:border-blue-500 transition-colors" 
-                            placeholder="مثلا: example@mail.com"
-                        />
+                 <form onSubmit={handleForgotPasswordRequest} className="space-y-5 animate-fade-in max-w-sm mx-auto w-full">
+                     <div className="text-center mb-6">
+                         <h3 className="text-lg font-bold text-white">بازیابی رمز عبور</h3>
+                         <p className="text-xs text-slate-400 mt-1">لینک تغییر رمز به ایمیل شما ارسال خواهد شد.</p>
                      </div>
 
-                     <button type="submit" disabled={isLoading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20">
-                         {isLoading ? <Loader2 className="animate-spin"/> : 'ارسال لینک بازیابی'}
-                     </button>
-                     <button type="button" onClick={() => { setView('LOGIN'); setError(''); }} className="w-full text-slate-500 text-sm py-2 hover:text-white">بازگشت به ورود</button>
+                     {resetSent ? (
+                         <div className="bg-emerald-900/20 border border-emerald-500/30 p-4 rounded-xl text-center">
+                             <CheckCircle className="mx-auto mb-2 text-emerald-500" size={24}/>
+                             <p className="text-sm text-white">لینک ارسال شد. ایمیل خود را چک کنید.</p>
+                             <button type="button" onClick={() => setView('LOGIN')} className="mt-4 text-xs text-emerald-400 hover:underline">بازگشت به ورود</button>
+                         </div>
+                     ) : (
+                         <>
+                            <div>
+                                <label className="block text-xs text-slate-400 mb-1 mr-1 font-bold">ایمیل</label>
+                                <div className="relative">
+                                <Mail className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+                                <input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3.5 pr-10 pl-4 text-white outline-none focus:border-blue-500 transition-colors" required placeholder="aryan@example.com"/>
+                                </div>
+                            </div>
+                            <button type="submit" disabled={isLoading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl mt-4 flex items-center justify-center gap-2">
+                                {isLoading ? <Loader2 className="animate-spin" size={20}/> : 'ارسال لینک بازیابی'}
+                            </button>
+                            <button type="button" onClick={() => setView('LOGIN')} className="w-full text-slate-500 text-sm py-2 hover:text-white">بازگشت</button>
+                         </>
+                     )}
                  </form>
             )}
 

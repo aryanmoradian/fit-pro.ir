@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { AppView, UserProfile, WorkoutPlan, ExerciseDefinition, TraineeSummary, TraineeData } from './types';
-import { DEFAULT_USER_PROFILE, MOCK_COACH_PROFILE, MOCK_ATHLETE_PROFILE, EXERCISE_DATABASE, ADMIN_CONFIG } from './constants';
+import { DEFAULT_USER_PROFILE, MOCK_ATHLETE_PROFILE, EXERCISE_DATABASE, ADMIN_CONFIG } from './constants';
 import { LayoutDashboard, User, Utensils, Video, Globe, CalendarPlus, PlayCircle, Users, ArrowRight, MessageSquare, CreditCard, Loader2, LogOut } from 'lucide-react';
-import { saveUserProfile, fetchUserData, saveUserData, completeOnboarding, saveWorkoutPlan, fetchActiveWorkoutPlan } from './services/userData';
+import { saveUserProfile, fetchUserData, saveUserData, completeOnboarding, saveWorkoutPlan, fetchActiveWorkoutPlan, linkTraineeToCoach } from './services/userData';
 import { useAuth } from './context/AuthContext';
 
 // Components
@@ -53,7 +53,6 @@ function App() {
               setIsLoadingData(true);
               try {
                   // 1. Map Auth User to UserProfile state
-                  // Note: useAuth already merges profile data, but we need to ensure it matches UserProfile type structure perfectly for the UI
                   const profile: UserProfile = {
                       ...DEFAULT_USER_PROFILE,
                       id: user.id,
@@ -66,7 +65,9 @@ function App() {
                       verificationStatus: user.verificationStatus,
                       inviteCode: user.inviteCode,
                       avatarUrl: user.avatarUrl,
-                      // Add other fields if they exist in user context or fetch fresh if needed
+                      coachConnectStatus: user.coachConnectStatus,
+                      connectedCoachName: user.connectedCoachName,
+                      hasSeenDashboardTour: user.hasSeenDashboardTour,
                   };
                   setUserProfile(profile);
 
@@ -88,9 +89,7 @@ function App() {
                   if (dbTraineeData) {
                       setTraineData(dbTraineeData);
                   } else {
-                      // Init empty if new
                       const initData: TraineeData = { workoutLogs: [], wellnessLogs: [], nutritionLogs: [] };
-                      // await saveUserData(user.id, initData); // Optional: create on first load
                       setTraineData(initData);
                   }
 
@@ -135,13 +134,22 @@ function App() {
       }
   };
 
-  const handleConnectRequest = (inviteCode: string) => {
-      if (inviteCode === MOCK_COACH_PROFILE.inviteCode && MOCK_COACH_PROFILE.inviteCode !== '') {
-          alert(`درخواست شما برای ${MOCK_COACH_PROFILE.name} ارسال شد.`);
-          const updated = { ...userProfile, coachConnectStatus: 'Pending' as const };
-          handleProfileUpdate(updated);
-      } else {
-          alert("کد دعوت معتبر نیست.");
+  const handleConnectRequest = async (inviteCode: string) => {
+      if (!inviteCode) return;
+      try {
+          const { coachName, coachId } = await linkTraineeToCoach(userProfile.id, userProfile.name, inviteCode);
+          alert(`درخواست شما برای ${coachName} ارسال شد.`);
+          
+          const updated = { 
+              ...userProfile, 
+              coachConnectStatus: 'Pending' as const,
+              connectedCoachName: coachName,
+              coachId: coachId 
+          };
+          setUserProfile(updated);
+          await saveUserProfile(updated);
+      } catch (e: any) {
+          alert(e.message || "کد دعوت معتبر نیست یا خطایی رخ داده است.");
       }
   };
 

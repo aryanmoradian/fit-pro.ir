@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { MOCK_PENDING_COACHES, MOCK_TRAINEES, MOCK_ACTIVE_COACHES, ADMIN_CONFIG } from '../constants';
 import { ShieldCheck, Lock, User, CheckCircle, XCircle, CreditCard, Users, Activity, LogOut, FileText, Filter, Crown, ArrowUp, ArrowDown, AlertTriangle, RefreshCw, Search, Eye, Database, Loader2, Info, ExternalLink, DollarSign, Hash, Clipboard, Calendar } from 'lucide-react';
 import { UserProfile, PaymentRequest } from '../types';
-import { supabase } from '../supabaseConfig'; 
+import { supabase } from '../lib/supabaseClient'; 
 import { fetchTransactions, processPayment, fetchPendingCoaches, updateCoachVerificationStatus } from '../services/userData';
 
 const SuperAdminDashboard: React.FC = () => {

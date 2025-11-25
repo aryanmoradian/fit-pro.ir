@@ -1,4 +1,3 @@
-
 import { supabase } from "../lib/supabaseClient";
 import { UserProfile, TraineeData, VideoFeedbackLog, PaymentRequest, WorkoutLog, WellnessLog, NutritionLog, AnthropometryLog, ExerciseDefinition, WorkoutPlan, TraineeSummary, DirectMessage } from "../types";
 
@@ -34,7 +33,7 @@ const mapProfileFromDB = (data: any): UserProfile => ({
     experienceLevel: data.experience_level || 'Beginner',
     coachConnectStatus: data.coach_connect_status || 'None',
     coachId: data.coach_id,
-    connectedCoachName: data.coach?.full_name 
+    connectedCoachName: data.coach?.full_name // Mapped from Joined Table
 });
 
 const mapProfileToDB = (profile: UserProfile) => {
@@ -43,11 +42,16 @@ const mapProfileToDB = (profile: UserProfile) => {
         email: profile.email,
         full_name: profile.name,
         role: profile.role,
-        avatar_url: profile.avatarUrl || profile.certUrl,
+        avatar_url: profile.avatarUrl || profile.certUrl, // Fallback if certUrl used as avatar
         phone_number: profile.phoneNumber,
-        // subscription fields are read-only for frontend updates usually, handled by API
+        
+        subscription_tier: profile.subscriptionTier,
+        subscription_status: profile.subscriptionStatus,
+        subscription_expiry_date: profile.subscriptionExpiryDate,
+        verification_status: profile.verificationStatus,
         
         settings: profile.settings,
+        
         bio: profile.bio,
         is_active: profile.isActive,
         invite_code: profile.inviteCode,
@@ -120,15 +124,15 @@ const mapExerciseToDB = (e: ExerciseDefinition, userId: string) => ({
 
 const mapPlanToDB = (plan: WorkoutPlan) => {
     return {
-        user_id: plan.userId,
+        user_id: plan.userId, // Owner
         trainee_id: plan.traineeId || null,
         name: plan.name,
         description: plan.description || null,
         start_date: plan.startDate,
         weeks_count: plan.weeksCount,
         creator_id: plan.creatorId,
-        days: plan.days, 
-        nutrition_template: plan.nutritionTemplate || [], 
+        days: plan.days, // JSONB
+        nutrition_template: plan.nutritionTemplate || [], // JSONB
         is_active: plan.isActive
     };
 };
@@ -146,6 +150,293 @@ const mapPlanFromDB = (data: any): WorkoutPlan => ({
     nutritionTemplate: data.nutrition_template,
     isActive: data.is_active
 });
+
+// --- PROFILE SERVICES ---
+
+export const fetchUserProfile = async (uid: string): Promise<UserProfile | null> => {
+  try {
+    // Explicitly join the profiles table again for the coach info
+    // We use the FK 'coach_id' which references 'profiles.id'
+    const { data, error } = await supabase
+      .from('profiles')
+      .select(`
+        *,
+        measurements (*),
+        custom_exercises (*),
+        coach:profiles!coach_id ( full_name )
+      `)
+      .eq('id', uid)
+      .single();
+
+    if (error) {
+        if (error.code === 'PGRST116') return null; // Not found
+        console.error("Supabase profile fetch error:", error.message);
+        return null; 
+    }
+    
+    if (data.measurements) {
+        data.measurements.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }
+
+    return mapProfileFromDB(data);
+  } catch (error) {
+    console.error("Unexpected error fetching profile:", error);
+    return null;
+  }
+};
+
+export const saveUserProfile = async (profile: UserProfile) => {
+  try {
+    if (!profile.id) throw new Error("User ID is missing");
+    
+    const dbData = mapProfileToDB(profile);
+    
+    const { error } = await supabase
+      .from('profiles')
+      .upsert(dbData, { onConflict: 'id' });
+
+    if (error) throw error;
+
+    if (profile.measurements && profile.measurements.length > 0) {
+        const lastMeasurement = profile.measurements[profile.measurements.length - 1];
+        const mDb = mapMeasurementToDB(lastMeasurement, profile.id);
+        
+        const { error: mError } = await supabase
+            .from('measurements')
+            .upsert({ ...mDb, id: lastMeasurement.logId.startsWith('init') ? undefined : lastMeasurement.logId });
+        
+        if (mError) console.error("Error saving measurement:", mError);
+    }
+    
+    if (profile.customExercises && profile.customExercises.length > 0) {
+        for (const ex of profile.customExercises) {
+            if (ex.id.startsWith('custom_')) {
+                 const exDb = mapExerciseToDB(ex, profile.id);
+                 await supabase.from('custom_exercises').insert(exDb);
+            }
+        }
+    }
+
+  } catch (error) {
+    console.error("Error saving user profile:", error);
+    throw error;
+  }
+};
+
+export const updateCoachVerificationStatus = async (userId: string, status: 'Verified' | 'Rejected' | 'Pending') => {
+    try {
+        const { error } = await supabase
+            .from('profiles')
+            .update({ verification_status: status })
+            .eq('id', userId);
+
+        if (error) throw error;
+    } catch (error) {
+        console.error("Error updating verification status:", error);
+        throw error;
+    }
+};
+
+export const generateInviteCode = async (userId: string): Promise<string> => {
+    const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const code = `COACH_${randomStr}`;
+
+    try {
+        const { error } = await supabase
+            .from('profiles')
+            .update({ invite_code: code })
+            .eq('id', userId);
+
+        if (error) throw error;
+        return code;
+    } catch (error) {
+        console.error("Error generating invite code:", error);
+        throw error;
+    }
+};
+
+export const fetchCoachTrainees = async (coachId: string): Promise<TraineeSummary[]> => {
+    try {
+        const { data, error } = await supabase
+            .from('profiles')
+            .select(`
+                *,
+                workout_logs (date)
+            `)
+            .eq('coach_id', coachId);
+
+        if (error) throw error;
+
+        return data.map((p: any) => {
+            const logs = p.workout_logs || [];
+            logs.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
+            const lastActive = logs.length > 0 ? logs[0].date : 'Inactive';
+            
+            const consistency = Math.min(100, logs.length * 2); 
+
+            return {
+                id: p.id,
+                name: p.full_name || p.email,
+                lastActive: lastActive,
+                planName: 'برنامه فعال', 
+                consistencyScore: consistency,
+                status: consistency > 80 ? 'OnTrack' : consistency < 20 ? 'Inactive' : 'Risk',
+                photoUrl: p.avatar_url,
+                paymentStatus: p.subscription_status === 'Active' ? 'Active' : 'Expired',
+                subscriptionExpiryDate: p.subscription_expiry_date
+            } as TraineeSummary;
+        });
+    } catch (error) {
+        console.error("Error fetching trainees:", error);
+        return [];
+    }
+};
+
+export const fetchAllCoaches = async (): Promise<UserProfile[]> => {
+    try {
+        const { data, error } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('role', 'Coach')
+            .eq('verification_status', 'Verified');
+
+        if (error) throw error;
+        return data.map(mapProfileFromDB);
+    } catch (error) {
+        console.error("Error fetching coaches:", error);
+        return [];
+    }
+};
+
+export const linkTraineeToCoach = async (traineeId: string, traineeName: string, inviteCode: string) => {
+    try {
+        const { data: coachData, error: coachError } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('invite_code', inviteCode)
+            .single();
+
+        if (coachError || !coachData) throw new Error("کد دعوت نامعتبر است.");
+
+        const newRequest = {
+            id: `req_${Date.now()}`,
+            traineeId: traineeId,
+            traineeName: traineeName,
+            date: new Date().toISOString().split('T')[0],
+            status: 'Pending'
+        };
+
+        const currentRequests = coachData.pending_requests || [];
+        const updatedRequests = [...currentRequests, newRequest];
+
+        const { error: updateError } = await supabase
+            .from('profiles')
+            .update({ pending_requests: updatedRequests })
+            .eq('id', coachData.id);
+
+        if (updateError) throw updateError;
+
+        return { coachName: coachData.full_name, coachId: coachData.id };
+
+    } catch (error) {
+        console.error("Error linking trainee to coach:", error);
+        throw error;
+    }
+};
+
+// --- WORKOUT PLAN SERVICES ---
+
+export const saveWorkoutPlan = async (plan: WorkoutPlan): Promise<WorkoutPlan> => {
+    try {
+        const dbData = mapPlanToDB(plan);
+        const { data, error } = await supabase
+            .from('workout_plans')
+            .insert(dbData)
+            .select()
+            .single();
+
+        if (error) throw error;
+        return mapPlanFromDB(data);
+    } catch (error) {
+        console.error("Error saving workout plan:", error);
+        throw error;
+    }
+};
+
+export const fetchActiveWorkoutPlan = async (userId: string): Promise<WorkoutPlan | null> => {
+    try {
+        const { data, error } = await supabase
+            .from('workout_plans')
+            .select('*')
+            .or(`user_id.eq.${userId},trainee_id.eq.${userId}`)
+            .eq('is_active', true)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+
+        if (error) {
+            if (error.code === 'PGRST116') return null;
+            throw error;
+        }
+        return mapPlanFromDB(data);
+    } catch (error) {
+        console.error("Error fetching active plan:", error);
+        return null;
+    }
+};
+
+// --- STORAGE & DOCUMENTS SERVICES ---
+
+export const uploadCertification = async (uid: string, file: File): Promise<string> => {
+    try {
+        const timestamp = Date.now();
+        const cleanName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
+        const filePath = `certifications/${uid}/${timestamp}_${cleanName}`;
+
+        const { error: uploadError } = await supabase.storage
+            .from('documents') 
+            .upload(filePath, file);
+
+        if (uploadError) throw uploadError;
+
+        const { data } = supabase.storage.from('documents').getPublicUrl(filePath);
+        const publicUrl = data.publicUrl;
+
+        await supabase
+            .from('documents')
+            .insert({
+                coach_id: uid,
+                file_url: publicUrl,
+                status: 'pending'
+            });
+
+        return publicUrl;
+    } catch (error) {
+        console.error("Error uploading certification:", error);
+        throw error;
+    }
+};
+
+export const uploadWorkoutVideo = async (uid: string, file: File): Promise<string> => {
+    try {
+        const bucketName = 'documents';
+        const timestamp = Date.now();
+        const cleanName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
+        const filePath = `workout_videos/${uid}/${timestamp}_${cleanName}`;
+        
+        const { error: uploadError } = await supabase.storage
+            .from(bucketName)
+            .upload(filePath, file);
+
+        if (uploadError) throw uploadError;
+
+        const { data } = supabase.storage.from(bucketName).getPublicUrl(filePath);
+        return data.publicUrl;
+    } catch (error) {
+        console.error("Error uploading video:", error);
+        throw error;
+    }
+};
 
 const mapWorkoutLogFromDB = (l: any): WorkoutLog => ({
     id: l.id,
@@ -211,274 +502,6 @@ const mapNutritionLogToDB = (l: NutritionLog, userId: string) => ({
     macros: l.macros
 });
 
-// --- PROFILE SERVICES (Standard CRUD) ---
-
-export const fetchUserProfile = async (uid: string): Promise<UserProfile | null> => {
-  try {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select(`
-        *,
-        measurements (*),
-        custom_exercises (*),
-        coach:profiles!coach_id ( full_name )
-      `)
-      .eq('id', uid)
-      .single();
-
-    if (error) {
-        if (error.code === 'PGRST116') return null;
-        console.error("Supabase profile fetch error:", error.message);
-        return null; 
-    }
-    
-    if (data.measurements) {
-        data.measurements.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    }
-
-    return mapProfileFromDB(data);
-  } catch (error) {
-    console.error("Unexpected error fetching profile:", error);
-    return null;
-  }
-};
-
-export const saveUserProfile = async (profile: UserProfile) => {
-  try {
-    if (!profile.id) throw new Error("User ID is missing");
-    
-    const dbData = mapProfileToDB(profile);
-    
-    // Simple Update: RLS allows user to update their own profile
-    const { error } = await supabase
-      .from('profiles')
-      .upsert(dbData, { onConflict: 'id' });
-
-    if (error) throw error;
-
-    if (profile.measurements && profile.measurements.length > 0) {
-        const lastMeasurement = profile.measurements[profile.measurements.length - 1];
-        const mDb = mapMeasurementToDB(lastMeasurement, profile.id);
-        const { error: mError } = await supabase
-            .from('measurements')
-            .upsert({ ...mDb, id: lastMeasurement.logId.startsWith('init') ? undefined : lastMeasurement.logId });
-        if (mError) console.error("Error saving measurement:", mError);
-    }
-    
-    if (profile.customExercises && profile.customExercises.length > 0) {
-        for (const ex of profile.customExercises) {
-            if (ex.id.startsWith('custom_')) {
-                 const exDb = mapExerciseToDB(ex, profile.id);
-                 await supabase.from('custom_exercises').insert(exDb);
-            }
-        }
-    }
-  } catch (error) {
-    console.error("Error saving user profile:", error);
-    throw error;
-  }
-};
-
-export const updateCoachVerificationStatus = async (userId: string, status: 'Verified' | 'Rejected' | 'Pending') => {
-    // This should ideally be an admin action, but for self-update during initial flow (re-upload), we try direct.
-    // If blocked by RLS, logic should move to an API. For now, assuming 'Pending' is allowed.
-    try {
-        const { error } = await supabase
-            .from('profiles')
-            .update({ verification_status: status })
-            .eq('id', userId);
-        if (error) throw error;
-    } catch (error) {
-        console.error("Error updating verification status:", error);
-        throw error;
-    }
-};
-
-export const generateInviteCode = async (userId: string): Promise<string> => {
-    const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const code = `COACH_${randomStr}`;
-    try {
-        const { error } = await supabase
-            .from('profiles')
-            .update({ invite_code: code })
-            .eq('id', userId);
-        if (error) throw error;
-        return code;
-    } catch (error) {
-        console.error("Error generating invite code:", error);
-        throw error;
-    }
-};
-
-export const fetchCoachTrainees = async (coachId: string): Promise<TraineeSummary[]> => {
-    try {
-        const { data, error } = await supabase
-            .from('profiles')
-            .select(`*, workout_logs (date)`)
-            .eq('coach_id', coachId);
-
-        if (error) throw error;
-
-        return data.map((p: any) => {
-            const logs = p.workout_logs || [];
-            logs.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
-            const lastActive = logs.length > 0 ? logs[0].date : 'Inactive';
-            const consistency = Math.min(100, logs.length * 2); 
-
-            return {
-                id: p.id,
-                name: p.full_name || p.email,
-                lastActive: lastActive,
-                planName: 'برنامه فعال', 
-                consistencyScore: consistency,
-                status: consistency > 80 ? 'OnTrack' : consistency < 20 ? 'Inactive' : 'Risk',
-                photoUrl: p.avatar_url,
-                paymentStatus: p.subscription_status === 'Active' ? 'Active' : 'Expired',
-                subscriptionExpiryDate: p.subscription_expiry_date
-            } as TraineeSummary;
-        });
-    } catch (error) {
-        console.error("Error fetching trainees:", error);
-        return [];
-    }
-};
-
-export const fetchAllCoaches = async (): Promise<UserProfile[]> => {
-    try {
-        const { data, error } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('role', 'Coach')
-            .eq('verification_status', 'Verified');
-        if (error) throw error;
-        return data.map(mapProfileFromDB);
-    } catch (error) {
-        console.error("Error fetching coaches:", error);
-        return [];
-    }
-};
-
-export const linkTraineeToCoach = async (traineeId: string, traineeName: string, inviteCode: string) => {
-    try {
-        // 1. Find Coach by Invite Code
-        const { data: coachData, error: coachError } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('invite_code', inviteCode)
-            .single();
-
-        if (coachError || !coachData) throw new Error("کد دعوت نامعتبر است.");
-
-        // 2. Update Coach's pending requests (Direct DB update allowed for array append via logic or API)
-        // Note: Updating another user's profile is blocked by RLS.
-        // We must use a public/shared table for requests or a serverless function.
-        // For simplicity here, we assume a 'requests' table exists OR we use the User Data API pattern.
-        // Let's use the API pattern to be safe with RLS.
-        
-        // However, for this specific implementation phase, let's assume the trainee updates their OWN profile
-        // to say "I requested Coach X", and we rely on the Coach to see that.
-        // But the schema puts 'pending_requests' on the Coach profile.
-        // Solution: Use a fetch to a secure API or assume an RPC.
-        // Fallback: We will just append to the coach's profile assuming an RLS policy allows 'update pending_requests if invite_code match'.
-        // If that fails, we'd need an API.
-        
-        const newRequest = {
-            id: `req_${Date.now()}`,
-            traineeId: traineeId,
-            traineeName: traineeName,
-            date: new Date().toISOString().split('T')[0],
-            status: 'Pending'
-        };
-        
-        const currentRequests = coachData.pending_requests || [];
-        const updatedRequests = [...currentRequests, newRequest];
-
-        const { error: updateError } = await supabase
-            .from('profiles')
-            .update({ pending_requests: updatedRequests })
-            .eq('id', coachData.id);
-
-        // If RLS blocks this, we would need an API. Assuming it might work or we accept the limitation for now.
-        if (updateError) throw updateError;
-
-        return { coachName: coachData.full_name, coachId: coachData.id };
-
-    } catch (error) {
-        console.error("Error linking trainee to coach:", error);
-        throw error;
-    }
-};
-
-// --- WORKOUT & DATA SERVICES (Standard CRUD) ---
-
-export const saveWorkoutPlan = async (plan: WorkoutPlan): Promise<WorkoutPlan> => {
-    try {
-        const dbData = mapPlanToDB(plan);
-        const { data, error } = await supabase
-            .from('workout_plans')
-            .insert(dbData)
-            .select()
-            .single();
-        if (error) throw error;
-        return mapPlanFromDB(data);
-    } catch (error) {
-        console.error("Error saving workout plan:", error);
-        throw error;
-    }
-};
-
-export const fetchActiveWorkoutPlan = async (userId: string): Promise<WorkoutPlan | null> => {
-    try {
-        const { data, error } = await supabase
-            .from('workout_plans')
-            .select('*')
-            .or(`user_id.eq.${userId},trainee_id.eq.${userId}`)
-            .eq('is_active', true)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .single();
-
-        if (error) {
-            if (error.code === 'PGRST116') return null;
-            throw error;
-        }
-        return mapPlanFromDB(data);
-    } catch (error) {
-        console.error("Error fetching active plan:", error);
-        return null;
-    }
-};
-
-export const uploadCertification = async (uid: string, file: File): Promise<string> => {
-    try {
-        const timestamp = Date.now();
-        const cleanName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
-        const filePath = `certifications/${uid}/${timestamp}_${cleanName}`;
-        const { error: uploadError } = await supabase.storage.from('documents').upload(filePath, file);
-        if (uploadError) throw uploadError;
-        const { data } = supabase.storage.from('documents').getPublicUrl(filePath);
-        return data.publicUrl;
-    } catch (error) {
-        console.error("Error uploading certification:", error);
-        throw error;
-    }
-};
-
-export const uploadWorkoutVideo = async (uid: string, file: File): Promise<string> => {
-    try {
-        const timestamp = Date.now();
-        const cleanName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
-        const filePath = `workout_videos/${uid}/${timestamp}_${cleanName}`;
-        const { error: uploadError } = await supabase.storage.from('documents').upload(filePath, file);
-        if (uploadError) throw uploadError;
-        const { data } = supabase.storage.from('documents').getPublicUrl(filePath);
-        return data.publicUrl;
-    } catch (error) {
-        console.error("Error uploading video:", error);
-        throw error;
-    }
-};
-
 export const fetchUserData = async (uid: string): Promise<TraineeData | null> => {
     try {
         const [wLogs, wlLogs, nLogs] = await Promise.all([
@@ -486,6 +509,7 @@ export const fetchUserData = async (uid: string): Promise<TraineeData | null> =>
             supabase.from('wellness_logs').select('*').eq('user_id', uid),
             supabase.from('nutrition_logs').select('*').eq('user_id', uid)
         ]);
+
         return {
             workoutLogs: wLogs.data?.map(mapWorkoutLogFromDB) || [],
             wellnessLogs: wlLogs.data?.map(mapWellnessLogFromDB) || [],
@@ -504,8 +528,11 @@ export const saveUserData = async (uid: string, data: Partial<TraineeData>) => {
                 const mapped = mapWorkoutLogToDB(l, uid);
                 return l.id.startsWith('new_') ? { ...mapped } : { ...mapped, id: l.id };
             });
-            await supabase.from('workout_logs').upsert(dbLogs);
+            
+            const { error } = await supabase.from('workout_logs').upsert(dbLogs);
+            if(error) console.error("Workout log save error", error);
         }
+
         if (data.wellnessLogs && data.wellnessLogs.length > 0) {
             const dbLogs = data.wellnessLogs.map(l => {
                 const mapped = mapWellnessLogToDB(l, uid);
@@ -513,6 +540,7 @@ export const saveUserData = async (uid: string, data: Partial<TraineeData>) => {
             });
             await supabase.from('wellness_logs').upsert(dbLogs);
         }
+
         if (data.nutritionLogs && data.nutritionLogs.length > 0) {
             const dbLogs = data.nutritionLogs.map(l => {
                 const mapped = mapNutritionLogToDB(l, uid);
@@ -520,6 +548,7 @@ export const saveUserData = async (uid: string, data: Partial<TraineeData>) => {
             });
             await supabase.from('nutrition_logs').upsert(dbLogs);
         }
+
     } catch (error) {
         console.error("Error saving user data:", error);
     }
@@ -544,6 +573,7 @@ export const saveVideoFeedback = async (uid: string, feedback: VideoFeedbackLog)
 export const completeOnboarding = async (uid: string) => {
     const { data } = await supabase.from('profiles').select('settings').eq('id', uid).single();
     const currentSettings = data?.settings || {};
+    
     await supabase.from('profiles').update({
         settings: { ...currentSettings, hasSeenDashboardTour: true }
     }).eq('id', uid);
@@ -556,6 +586,7 @@ export const fetchPendingCoaches = async (): Promise<UserProfile[]> => {
             .select('*')
             .eq('role', 'Coach')
             .eq('verification_status', 'Pending');
+
         if (error) throw error;
         return data.map(mapProfileFromDB);
     } catch (error) {
@@ -568,9 +599,17 @@ export const fetchTransactions = async (): Promise<PaymentRequest[]> => {
     try {
         const { data, error } = await supabase
             .from('transactions')
-            .select(`*, profiles:user_id (full_name)`)
+            .select(`
+                *,
+                profiles:user_id (full_name)
+            `)
             .order('created_at', { ascending: false });
-        if (error) return [];
+
+        if (error) {
+             console.warn("Transactions fetch error (check table existence):", error.message);
+             return [];
+        }
+
         return data.map((t: any) => ({
             id: t.id,
             userId: t.user_id,
@@ -589,6 +628,66 @@ export const fetchTransactions = async (): Promise<PaymentRequest[]> => {
     }
 };
 
+export const submitPaymentRequest = async (request: PaymentRequest): Promise<'AUTO_APPROVED' | 'PENDING'> => {
+    try {
+        const { error } = await supabase
+            .from('transactions')
+            .insert({
+                user_id: request.userId,
+                tx_id: request.txId,
+                amount: request.amountUSD,
+                status: 'Pending',
+                months: request.months
+            });
+
+        if (error) throw error;
+        
+        return 'PENDING';
+    } catch (error) {
+        console.error("Error submitting payment:", error);
+        throw error;
+    }
+};
+
+export const processPayment = async (requestId: string, userId: string, status: 'Approved' | 'Rejected', months: number) => {
+    try {
+        const { error } = await supabase
+            .from('transactions')
+            .update({ status })
+            .eq('id', requestId);
+
+        if (error) throw error;
+
+        if (status === 'Approved') {
+             const expiryDate = new Date();
+             expiryDate.setDate(expiryDate.getDate() + (months * 30));
+             
+             await supabase.from('profiles').update({
+                subscription_tier: 'Premium',
+                subscription_status: 'Active',
+                subscription_expiry_date: expiryDate.toLocaleDateString('fa-IR')
+            }).eq('id', userId);
+        }
+    } catch (error) {
+        console.error("Error processing payment:", error);
+        throw error;
+    }
+};
+
+export const sendEmailNotification = async (type: string, payload: any) => {
+    try {
+        await fetch('/api/send-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, payload })
+        });
+    } catch(e) {
+        console.error("Failed to send email notification", e);
+    }
+};
+
+// --- REALTIME MESSAGING SERVICES ---
+
 export const fetchMessages = async (senderId: string, receiverId: string): Promise<DirectMessage[]> => {
     try {
         const { data, error } = await supabase
@@ -596,7 +695,9 @@ export const fetchMessages = async (senderId: string, receiverId: string): Promi
             .select('*')
             .or(`and(sender_id.eq.${senderId},receiver_id.eq.${receiverId}),and(sender_id.eq.${receiverId},receiver_id.eq.${senderId})`)
             .order('created_at', { ascending: true });
+
         if (error) throw error;
+
         return data.map((msg: any) => ({
             id: msg.id,
             senderId: msg.sender_id,
@@ -616,86 +717,16 @@ export const sendDirectMessage = async (senderId: string, receiverId: string, te
     try {
         const { error } = await supabase
             .from('direct_messages')
-            .insert({ sender_id: senderId, receiver_id: receiverId, text: text, is_read: false });
+            .insert({
+                sender_id: senderId,
+                receiver_id: receiverId,
+                text: text,
+                is_read: false
+            });
+        
         if (error) throw error;
     } catch (error) {
         console.error("Error sending message:", error);
         throw error;
-    }
-};
-
-// --- SENSITIVE ACTIONS (Uses Vercel API Proxy) ---
-
-export const submitPaymentRequest = async (request: PaymentRequest): Promise<'AUTO_APPROVED' | 'PENDING'> => {
-    try {
-        // Sensitive: Uses /api/process-payment to access supabaseAdmin
-        const response = await fetch('/api/process-payment', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                action: 'SUBMIT',
-                requestData: request
-            })
-        });
-
-        if (!response.ok) throw new Error('Payment submission failed');
-        const result = await response.json();
-        return result.status === 'AUTO_APPROVED' ? 'AUTO_APPROVED' : 'PENDING';
-    } catch (error) {
-        console.error("Error submitting payment:", error);
-        throw error;
-    }
-};
-
-export const processPayment = async (requestId: string, userId: string, status: 'Approved' | 'Rejected', months: number) => {
-    try {
-        // Sensitive: Admin action via /api/process-payment
-        const response = await fetch('/api/process-payment', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                action: 'PROCESS',
-                requestId,
-                userId,
-                status,
-                months
-            })
-        });
-
-        if (!response.ok) throw new Error('Payment processing failed');
-        return await response.json();
-    } catch (error) {
-        console.error("Error processing payment:", error);
-        throw error;
-    }
-};
-
-export const setUserRole = async (targetUserId: string, newRole: 'Coach' | 'Trainee' | 'Admin') => {
-    try {
-        // Sensitive: Admin action via /api/admin/set-role
-        const response = await fetch('/api/admin/set-role', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ targetUserId, newRole })
-        });
-
-        if (!response.ok) throw new Error('Failed to update role');
-        return await response.json();
-    } catch (error) {
-        console.error("Set Role Error:", error);
-        throw error;
-    }
-};
-
-export const sendEmailNotification = async (type: string, payload: any) => {
-    try {
-        // Server-side logic via /api/send-email
-        await fetch('/api/send-email', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type, payload })
-        });
-    } catch(e) {
-        console.error("Failed to send email notification", e);
     }
 };

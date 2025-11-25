@@ -1,13 +1,18 @@
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { createClient } from '@supabase/supabase-js';
-
-const supabaseUrl = "https://quniobapknhnqtcerdvf.supabase.co";
-const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF1bmlvYmFwa25obnF0Y2VyZHZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM3MzU2MjEsImV4cCI6MjA3OTMxMTYyMX0.oyb0AuLBeYSwjailvnzE2-79nMw1-Mcy5soRqkTNm7U";
-
-const supabase = createClient(supabaseUrl, supabaseKey);
+import { supabaseAdmin } from '../src/lib/supabaseAdmin';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -15,20 +20,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { action, requestData, requestId, userId, status, months } = req.body;
 
   try {
-    // 1. Submit New Payment Request
+    // 1. Submit New Payment Request (User Action)
     if (action === 'SUBMIT' && requestData) {
-        // Auto-verification logic check (Mock: if TxID is long enough)
-        const isVerified = requestData.txId.length > 8; 
+        // Auto-verification logic check (e.g. verify TxID length or format)
+        const isVerified = requestData.txId && requestData.txId.length > 10; 
         const finalStatus = isVerified ? 'Approved' : 'Pending';
 
-        // Insert into 'transactions' table
-        const { error } = await supabase
+        // Insert into 'transactions' table using Admin client
+        const { error } = await supabaseAdmin
             .from('transactions')
             .insert({
                 user_id: requestData.userId,
                 tx_id: requestData.txId,
                 amount: requestData.amountUSD,
-                status: finalStatus
+                status: finalStatus,
+                months: requestData.months || 1
             });
 
         if (error) throw error;
@@ -36,12 +42,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // If auto-verified, update the user's profile immediately
         if (isVerified) {
              const expiryDate = new Date();
-             expiryDate.setDate(expiryDate.getDate() + (requestData.months * 30));
-             
-             await supabase.from('profiles').update({
+             expiryDate.setDate(expiryDate.getDate() + ((requestData.months || 1) * 30));
+             const expiryString = expiryDate.toLocaleDateString('fa-IR');
+
+             await supabaseAdmin.from('profiles').update({
                 subscription_tier: 'Premium',
                 subscription_status: 'Active',
-                subscription_expiry_date: expiryDate.toLocaleDateString('fa-IR')
+                subscription_expiry_date: expiryString
             }).eq('id', requestData.userId);
 
             return res.status(200).json({ status: 'AUTO_APPROVED' });
@@ -50,10 +57,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return res.status(200).json({ status: 'PENDING_REVIEW' });
     }
 
-    // 2. Admin Manually Processes Request
+    // 2. Admin Manually Processes Request (Admin Action)
     if (action === 'PROCESS' && requestId && userId && status) {
         // Update 'transactions' status
-        const { error: paymentError } = await supabase
+        const { error: paymentError } = await supabaseAdmin
             .from('transactions')
             .update({ status: status })
             .eq('id', requestId);
@@ -63,14 +70,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         // If approved, update profile subscription
         if (status === 'Approved') {
             const expiryDate = new Date();
-            expiryDate.setDate(expiryDate.getDate() + (months * 30));
+            expiryDate.setDate(expiryDate.getDate() + ((months || 1) * 30));
+            const expiryString = expiryDate.toLocaleDateString('fa-IR');
             
-            await supabase.from('profiles').update({
+            const { error: profileError } = await supabaseAdmin.from('profiles').update({
                 subscription_tier: 'Premium',
                 subscription_status: 'Active',
-                subscription_expiry_date: expiryDate.toLocaleDateString('fa-IR')
+                subscription_expiry_date: expiryString
             }).eq('id', userId);
+
+            if (profileError) throw profileError;
         }
+
         return res.status(200).json({ success: true });
     }
 

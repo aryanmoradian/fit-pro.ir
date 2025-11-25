@@ -140,8 +140,8 @@ export interface AnthropometryLog {
 }
 
 // --- Table 3: Exercises (حرکات مرجع) ---
-export type MuscleGroup = 'Chest' | 'Back' | 'Legs' | 'Shoulders' | 'Biceps' | 'Triceps' | 'Abs' | 'Cardio';
-export type EquipmentType = 'Barbell' | 'Dumbbell' | 'Machine' | 'Cable' | 'Bodyweight' | 'Smith Machine';
+export type MuscleGroup = 'Chest' | 'Back' | 'Legs' | 'Shoulders' | 'Biceps' | 'Triceps' | 'Abs' | 'Cardio' | 'Full Body';
+export type EquipmentType = 'Barbell' | 'Dumbbell' | 'Machine' | 'Cable' | 'Bodyweight' | 'Smith Machine' | 'Kettlebell' | 'Band';
 
 export interface ExerciseDefinition {
   id: string; // exercise_id
@@ -150,6 +150,15 @@ export interface ExerciseDefinition {
   muscleGroup: MuscleGroup;
   equipment: EquipmentType;
   mechanics?: 'Compound' | 'Isolation';
+  
+  // Expanded Fields
+  difficulty?: 'Beginner' | 'Intermediate' | 'Advanced';
+  movementPattern?: string; // e.g. "Horizontal Push", "Squat", "Lunge"
+  primaryMuscles?: string[]; // Usually same as muscleGroup but can be specific
+  secondaryMuscles?: string[]; // e.g. ['Triceps', 'Front Delt']
+  instructions?: string[]; // Step-by-step guide
+  safetyNotes?: string; // Warnings
+  
   videoUrl?: string; // Link to form video
   anatomyImgUrl?: string; // Link to anatomy gif
 }
